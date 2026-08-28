@@ -79,6 +79,13 @@ PREFIX_MAP="-ffile-prefix-map=$WORK=/tflite -ffile-prefix-map=$HERE=/tflite"
 # its dependencies by compiling test programs, and some of them — eigen's
 # FindStandardMathLibrary is the first — cannot be configured for two
 # architectures at once.
+# The path of what was built is left in $BUILT rather than written to stdout
+# for the caller to read: `found=$(build_one)` puts the whole function in a
+# command substitution, where `set -e` no longer stops anything — a failing
+# cmake would be swallowed and the caller would report the library missing
+# instead of the compiler error that explains why. Which is exactly what a
+# Windows build did, for one whole run.
+BUILT=
 build_one() {
   local arch="$1"
   # Two statements, not one: a `local a=$1 b=$a` expands every word before it
@@ -125,19 +132,17 @@ build_one() {
       ;;
   esac
 
-  # Progress goes to stderr, because stdout is this function's return value:
-  # the caller reads the path of what was built out of it.
-  echo "== configuring $TARGET${arch:+ ($arch)}" >&2
-  cmake "${args[@]}" >&2
-  echo "== building tensorflowlite_c${arch:+ for $arch} (this takes a while)" >&2
+  echo "== configuring $TARGET${arch:+ ($arch)}"
+  cmake "${args[@]}"
+  echo "== building tensorflowlite_c${arch:+ for $arch} (this takes a while)"
   cmake --build "$dir" -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
-    --config Release --target tensorflowlite_c >&2
-  find "$dir" -name "$LIB" -type f | head -1
+    --config Release --target tensorflowlite_c
+  BUILT=$(find "$dir" -name "$LIB" -type f | head -1)
 }
 
 if [ "$TARGET" = darwin_universal ]; then
-  arm=$(build_one arm64)
-  intel=$(build_one x86_64)
+  build_one arm64; arm=$BUILT
+  build_one x86_64; intel=$BUILT
   [ -n "$arm" ] && [ -n "$intel" ] || { echo "one of the two slices is missing" >&2; exit 1; }
   lipo -create "$arm" "$intel" -output "$OUT/$LIB"
   # The loader looks for the library by the name it is linked against, and the
@@ -146,9 +151,9 @@ if [ "$TARGET" = darwin_universal ]; then
   install_name_tool -id "@rpath/$LIB" "$OUT/$LIB"
   echo "== architectures: $(lipo -archs "$OUT/$LIB")"
 else
-  found=$(build_one "")
-  [ -n "$found" ] || { echo "built, but no $LIB was produced" >&2; exit 1; }
-  cp "$found" "$OUT/$LIB"
+  build_one ""
+  [ -n "$BUILT" ] || { echo "built, but no $LIB was produced" >&2; exit 1; }
+  cp "$BUILT" "$OUT/$LIB"
 fi
 
 ls -l "$OUT/$LIB"
