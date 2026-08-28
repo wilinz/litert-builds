@@ -7,6 +7,18 @@
 #   linux_amd64        x86_64
 #   linux_arm64        aarch64
 #   windows_amd64      x64, MSVC
+#   android_arm64      arm64-v8a, needs an NDK
+#   android_arm        armeabi-v7a, needs an NDK
+#   android_x64        x86_64, needs an NDK
+#   ios_device         arm64, a static library
+#   ios_simulator      arm64 and x86_64, a static library
+#
+# The phones are here rather than taken from Google's own distributions —
+# LiteRT's Android AAR and the iOS framework CocoaPods pulls — because those
+# move on their own version lines: at the time of writing the AAR was LiteRT
+# 2.2.0 and the framework TensorFlow 2.17.0 while the desktops were on 2.17.1,
+# so the same weights ran against three different runtimes. One version for
+# every platform is the whole point of this repository.
 #
 # The version comes from tflite.toml beside this script; TENSORFLOW_VERSION
 # overrides it for trying one without committing to it.
@@ -34,13 +46,41 @@ TARGET="${1:-}"
 OUT="${2:-$HERE/out}"
 WORK="${TFLITE_WORKDIR:-$HERE/.work}"
 
+# What comes out, and what the phones need that the desktops do not.
+#
+# ANDROID_API and IOS_MIN are floors rather than choices: a library built for a
+# newer one will not load on an older phone, and wxscan's own minimums are
+# API 24 and iOS 13.
+ANDROID_API=24
+IOS_MIN=13.0
+
 case "$TARGET" in
   darwin_universal) LIB=libtensorflowlite_c.dylib ;;
   linux_amd64|linux_arm64) LIB=libtensorflowlite_c.so ;;
   windows_amd64) LIB=tensorflowlite_c.dll ;;
+  android_arm64) LIB=libtensorflowlite_c.so; ABI=arm64-v8a ;;
+  android_arm) LIB=libtensorflowlite_c.so; ABI=armeabi-v7a ;;
+  android_x64) LIB=libtensorflowlite_c.so; ABI=x86_64 ;;
+  # Static, because that is how an iOS application takes a C library: there is
+  # no rpath to load a .dylib from, and the framework Google publishes is a
+  # static object too.
+  ios_device) LIB=libtensorflowlite_c.a; SDK=iphoneos ;;
+  ios_simulator) LIB=libtensorflowlite_c.a; SDK=iphonesimulator ;;
   *)
-    echo "usage: $0 <darwin_universal|linux_amd64|linux_arm64|windows_amd64> [out]" >&2
+    echo "usage: $0 <target> [out]" >&2
+    echo "  darwin_universal linux_amd64 linux_arm64 windows_amd64" >&2
+    echo "  android_arm64 android_arm android_x64 ios_device ios_simulator" >&2
     exit 2
+    ;;
+esac
+
+case "$TARGET" in
+  android_*)
+    NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_ROOT:-}}}"
+    [ -n "$NDK" ] && [ -d "$NDK" ] || {
+      echo "no NDK: set ANDROID_NDK_HOME to one" >&2
+      exit 1
+    }
     ;;
 esac
 
@@ -102,6 +142,31 @@ build_one() {
   )
   case "$TARGET" in
     windows_amd64) args+=(-A x64) ;;
+    android_*)
+      args+=(
+        -DCMAKE_C_FLAGS="$PREFIX_MAP" -DCMAKE_CXX_FLAGS="$PREFIX_MAP"
+        -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
+        -DANDROID_ABI="$ABI"
+        -DANDROID_PLATFORM="android-$ANDROID_API"
+      )
+      ;;
+    ios_*)
+      # One architecture at a time here too, and for the same reason as macOS;
+      # the simulator's two are joined at the end.
+      args+=(
+        -DCMAKE_C_FLAGS="$PREFIX_MAP" -DCMAKE_CXX_FLAGS="$PREFIX_MAP"
+        -DCMAKE_SYSTEM_NAME=iOS
+        -DCMAKE_OSX_SYSROOT="$SDK"
+        -DCMAKE_OSX_ARCHITECTURES="$arch"
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_MIN"
+        # A shared library has nowhere to be loaded from on iOS, so the C API
+        # is built into an archive, and the archives its dependencies build
+        # are joined onto it below — CMake links none of them into a static
+        # target, and an application would otherwise be handed a library
+        # missing every kernel it needs.
+        -DTFLITE_C_BUILD_SHARED_LIBS=OFF
+      )
+      ;;
     *)
       args+=(-DCMAKE_C_FLAGS="$PREFIX_MAP" -DCMAKE_CXX_FLAGS="$PREFIX_MAP")
       # CMAKE_OSX_ARCHITECTURES alone tells the compiler which architecture to
@@ -141,10 +206,43 @@ build_one() {
   echo "== building tensorflowlite_c${arch:+ for $arch} (this takes a while)"
   cmake --build "$dir" -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
     --config Release --target tensorflowlite_c
-  BUILT=$(find "$dir" -name "$LIB" -type f | head -1)
+  case "$TARGET" in
+    ios_*) join_archives "$dir" "$WORK/$TARGET${arch:+-$arch}.a" ;;
+    *) BUILT=$(find "$dir" -name "$LIB" -type f | head -1) ;;
+  esac
 }
 
-if [ "$TARGET" = darwin_universal ]; then
+# Puts every archive a build produced into one, which is what an application
+# linking the C API on iOS needs: CMake leaves a static target's dependencies
+# beside it rather than in it, and TFLite's are XNNPACK, ruy, pthreadpool,
+# cpuinfo, farmhash, fft2d and flatbuffers — the kernels, in other words.
+#
+# The result goes into $BUILT for the same reason build_one's does: a function
+# read through a command substitution is a function whose failures nobody sees.
+join_archives() {
+  local dir="$1" out="$2"
+  local parts=()
+  while IFS= read -r a; do parts+=("$a"); done < <(find "$dir" -name '*.a' -type f)
+  [ "${#parts[@]}" -gt 0 ] || { echo "no archives under $dir" >&2; exit 1; }
+  rm -f "$out"
+  # Archives built from different projects hold objects of the same name, which
+  # libtool says so about, once per pair, in the hundreds. It is not a problem
+  # — they keep their own offsets — so the noise goes, and only it.
+  libtool -static -o "$out" "${parts[@]}" 2>&1 | grep -v "same member name" || true
+  [ -f "$out" ] || { echo "libtool produced no $out" >&2; exit 1; }
+  BUILT="$out"
+}
+
+if [ "$TARGET" = ios_simulator ]; then
+  # Both architectures, so one library serves a simulator on either kind of
+  # Mac; the device has only the one.
+  build_one arm64; sim_arm=$BUILT
+  build_one x86_64; sim_intel=$BUILT
+  lipo -create "$sim_arm" "$sim_intel" -output "$OUT/$LIB"
+elif [ "$TARGET" = ios_device ]; then
+  build_one arm64
+  cp "$BUILT" "$OUT/$LIB"
+elif [ "$TARGET" = darwin_universal ]; then
   build_one arm64; arm=$BUILT
   build_one x86_64; intel=$BUILT
   [ -n "$arm" ] && [ -n "$intel" ] || { echo "one of the two slices is missing" >&2; exit 1; }

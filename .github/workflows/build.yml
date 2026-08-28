@@ -91,6 +91,30 @@ jobs:
             runs-on: windows-latest
             lib: tensorflowlite_c.dll
             ext: zip
+          # The phones are built here rather than taken from Google's own
+          # distributions, which move on version lines of their own — the
+          # Android AAR and the iOS framework were two different TensorFlow
+          # versions from the desktops, against the same weights.
+          - target: android_arm64
+            runs-on: ubuntu-latest
+            lib: libtensorflowlite_c.so
+            ext: tar.gz
+          - target: android_arm
+            runs-on: ubuntu-latest
+            lib: libtensorflowlite_c.so
+            ext: tar.gz
+          - target: android_x64
+            runs-on: ubuntu-latest
+            lib: libtensorflowlite_c.so
+            ext: tar.gz
+          - target: ios_device
+            runs-on: macos-15
+            lib: libtensorflowlite_c.a
+            ext: tar.gz
+          - target: ios_simulator
+            runs-on: macos-15
+            lib: libtensorflowlite_c.a
+            ext: tar.gz
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4
@@ -125,7 +149,10 @@ jobs:
           NAME: tflite_c_${{ needs.settle.outputs.tag }}_${{ matrix.target }}
         run: |
           if [ "${{ matrix.ext }}" = zip ]; then
-            7z a "$NAME.zip" "${{ matrix.lib }}" "${{ matrix.target }}.build"
+            # bsdtar, which Windows carries as tar.exe, and -a picks the format
+            # from the extension. Not 7z: the runner image stopped shipping it,
+            # and this needs nothing installed.
+            tar -a -c -f "$NAME.zip" "${{ matrix.lib }}" "${{ matrix.target }}.build"
           else
             tar czf "$NAME.tar.gz" "${{ matrix.lib }}" "${{ matrix.target }}.build"
           fi

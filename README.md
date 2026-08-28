@@ -1,7 +1,8 @@
 # litert-builds
 
 The TensorFlow Lite C library — LiteRT's runtime, under the name its C API
-still carries — built for every desktop platform and published under one tag.
+still carries — built for every platform an application runs on, from one
+TensorFlow version, published under one tag.
 
 Nothing here is patched. The sources are cloned at the tag `tflite.toml` names
 and compiled with upstream's own CMake build, so what comes out is a plain
@@ -17,7 +18,14 @@ last. The library that has been serving that purpose was built by hand and its
 repository has not been touched since 2024 — which is fine until the version
 you need is the one that never appears.
 
-So this builds it: four targets, one script, in CI, from a pinned version.
+The phones are here too, though Google does publish those, because what it
+publishes moves on version lines of its own: the Android AAR was LiteRT 2.2.0
+and the iOS framework TensorFlow 2.17.0 while the desktops were on 2.17.1 —
+three runtimes, one set of weights, and nothing anywhere saying they had come
+apart. A version that means the same thing everywhere is worth more than a
+build somebody else ran.
+
+So this builds them: nine targets, one script, in CI, from a pinned version.
 
 ## What is built
 
@@ -27,6 +35,19 @@ So this builds it: four targets, one script, in CI, from a pinned version.
 | `linux_amd64` | `libtensorflowlite_c.so` | ubuntu-latest |
 | `linux_arm64` | `libtensorflowlite_c.so` | ubuntu-24.04-arm |
 | `windows_amd64` | `tensorflowlite_c.dll` | windows-latest |
+| `android_arm64` | `libtensorflowlite_c.so`, arm64-v8a | ubuntu-latest |
+| `android_arm` | `libtensorflowlite_c.so`, armeabi-v7a | ubuntu-latest |
+| `android_x64` | `libtensorflowlite_c.so`, x86_64 | ubuntu-latest |
+| `ios_device` | `libtensorflowlite_c.a`, arm64 | macos-15 |
+| `ios_simulator` | `libtensorflowlite_c.a`, arm64 and x86_64 | macos-15 |
+
+Android is built against API 24 and iOS against 13.0, which are floors rather
+than choices: a library built for a newer one will not load on an older phone.
+
+The iOS libraries are static — an application has no rpath to load a `.dylib`
+from — and each is every archive the build produced joined into one, because
+CMake leaves a static target's dependencies beside it rather than in it, and
+those dependencies are the kernels.
 
 The XNNPACK delegate is on, which is most of why the library is worth having:
 about five times on a small CNN.
