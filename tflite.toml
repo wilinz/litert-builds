@@ -1,0 +1,16 @@
+# The TensorFlow release these libraries are built from.
+#
+# One file, read by build.sh and by the workflow, so a local build and a
+# published one cannot disagree about what they are. A tag has to name the same
+# version or the workflow refuses it: that is a confirmation of what is being
+# published, not a second place to say it.
+#
+# `revision` is ours. It is the revision of build.sh, and it moves when the
+# build changes while the version stays put — different flags mean different
+# bytes under the same TensorFlow version, and a checksum in a downstream lock
+# file would be the only thing that noticed.
+#
+# Together they name a release: v2.17.1-b1.
+[tensorflow]
+version = "v2.17.1"
+revision = 1

@@ -1,0 +1,169 @@
+# Builds the TensorFlow Lite C library for every desktop target and publishes
+# them under one tag.
+#
+# One tag, four artifacts, one TensorFlow version: a downstream lock file pins
+# a release, and everything it pins was built from the same sources by the same
+# script. Platforms that drifted apart version by version is the thing this
+# exists to prevent.
+#
+# It runs on a tag and nothing else. Editing the build script does not trigger
+# it — a change worth publishing is worth tagging — and the tag has to name
+# what tflite.toml says, or the run stops. That is a confirmation of what is
+# being published, not a second place to say it.
+#
+# The tag names the TensorFlow version and this repository's own revision,
+# `v2.17.1-b1`, because both decide the bytes: the same sources built with
+# different flags are a different library, and a checksum in a lock file
+# downstream would be the only thing that noticed.
+#
+# There is no build cache. It would be keyed on exactly what the tag names, a
+# near-miss would restore a tree the script then declines to re-clone, and this
+# runs a few times a year.
+name: build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      revision: ${{ steps.v.outputs.revision }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          key() {
+            sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*$/\1/p" \
+              tflite.toml | head -1
+          }
+          version=$(key version)
+          revision=$(key revision)
+          [ -n "$version" ] || { echo "no [tensorflow] version in tflite.toml" >&2; exit 1; }
+          [ -n "$revision" ] || { echo "no [tensorflow] revision in tflite.toml" >&2; exit 1; }
+          tag="$version-b$revision"
+
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "the tag is $GITHUB_REF_NAME, but tflite.toml says $tag." >&2
+            echo "Tag $tag, or change tflite.toml first." >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "building TensorFlow $version at build revision $revision, publishing as $tag"
+
+  build:
+    needs: settle
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS builds both slices and joins them, so one library serves a
+          # universal application — which is what a release build is unless it
+          # is told otherwise.
+          - target: darwin_universal
+            runs-on: macos-15
+            lib: libtensorflowlite_c.dylib
+            ext: tar.gz
+          - target: linux_amd64
+            runs-on: ubuntu-latest
+            lib: libtensorflowlite_c.so
+            ext: tar.gz
+          - target: linux_arm64
+            runs-on: ubuntu-24.04-arm
+            lib: libtensorflowlite_c.so
+            ext: tar.gz
+          - target: windows_amd64
+            runs-on: windows-latest
+            lib: tensorflowlite_c.dll
+            ext: zip
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: bash
+        run: ./build.sh ${{ matrix.target }} "$GITHUB_WORKSPACE/out"
+
+      # What was built, by what, from what. A downstream lock file records the
+      # checksum; this records everything that decided it.
+      - name: Describe it
+        shell: bash
+        working-directory: out
+        run: |
+          sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+          {
+            echo "repository=${{ github.repository }}"
+            echo "commit=${{ github.sha }}"
+            echo "tensorflow=${{ needs.settle.outputs.version }}"
+            echo "revision=${{ needs.settle.outputs.revision }}"
+            echo "target=${{ matrix.target }}"
+            echo "runner=${{ matrix.runs-on }}"
+            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "sha256=$(sha ${{ matrix.lib }})"
+          } > ${{ matrix.target }}.build
+          cat ${{ matrix.target }}.build
+
+      - name: Archive
+        shell: bash
+        working-directory: out
+        env:
+          NAME: tflite_c_${{ needs.settle.outputs.tag }}_${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.ext }}" = zip ]; then
+            7z a "$NAME.zip" "${{ matrix.lib }}" "${{ matrix.target }}.build"
+          else
+            tar czf "$NAME.tar.gz" "${{ matrix.lib }}" "${{ matrix.target }}.build"
+          fi
+          shasum -a 256 "$NAME.${{ matrix.ext }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: out/tflite_c_*
+
+  publish:
+    needs: [settle, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+
+      # The checksums a downstream lock file needs, in one place, so nobody has
+      # to download four archives to write them down.
+      - name: Checksums
+        run: |
+          cd artifacts
+          shasum -a 256 tflite_c_* | tee SHA256SUMS
+          ls -l
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.settle.outputs.tag }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "TensorFlow Lite C, $TAG" \
+              --notes "The TensorFlow Lite C library with the XNNPACK delegate, built from TensorFlow ${{ needs.settle.outputs.version }} by this repository's build.sh.
+
+          Nothing is patched: the sources are cloned at that tag and compiled with upstream's own CMake build.
+
+          macOS carries both architectures in one library, so a universal application links one file. Each archive holds a \`.build\` file naming the version, the commit and runner that produced it, and the checksum; \`SHA256SUMS\` has all four.
+
+          The tag names the TensorFlow version and this repository's build revision, because the same sources built with different flags are a different library." 
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" artifacts/* --clobber
