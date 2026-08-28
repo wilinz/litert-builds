@@ -76,6 +76,13 @@ build_one() {
   local args=(
     -S "$WORK/tensorflow/tensorflow/lite/c" -B "$dir"
     -DCMAKE_BUILD_TYPE=Release
+    # CMake 4 removed compatibility with projects declaring a minimum below
+    # 3.5, and FP16, FXdiv and psimd — dependencies TFLite fetches, not code
+    # anyone here controls — still declare 2.8.12. Without this the configure
+    # stops there on any runner that has CMake 4, which is most of them now.
+    # It is a policy floor rather than a patch: the sources are still compiled
+    # as they are.
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     # The delegate is most of why this library is worth having: about five
     # times on a CNN, measured on the same kernels wxscan's detector uses.
     -DTFLITE_ENABLE_XNNPACK=ON
