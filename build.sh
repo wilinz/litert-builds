@@ -101,19 +101,7 @@ build_one() {
     -DTFLITE_ENABLE_XNNPACK=ON
   )
   case "$TARGET" in
-    # TensorFlow 2.17 uses designated initializers, which MSVC accepts only
-    # under /std:c++20 where clang and gcc take them as an extension — so this
-    # is the one toolchain that stops. It cannot be asked for with
-    # CMAKE_CXX_STANDARD, which TFLite's own CMakeLists sets to 17 and would
-    # overrule, so it goes in the flags, which MSBuild puts after that. The
-    # rest of the line is what CMake would have initialised the variable with,
-    # since naming it on the command line replaces those rather than adding.
-    windows_amd64)
-      args+=(
-        -A x64
-        -DCMAKE_CXX_FLAGS="/DWIN32 /D_WINDOWS /W3 /GR /EHsc /std:c++20"
-      )
-      ;;
+    windows_amd64) args+=(-A x64) ;;
     *)
       args+=(-DCMAKE_C_FLAGS="$PREFIX_MAP" -DCMAKE_CXX_FLAGS="$PREFIX_MAP")
       # CMAKE_OSX_ARCHITECTURES alone tells the compiler which architecture to
@@ -134,6 +122,22 @@ build_one() {
 
   echo "== configuring $TARGET${arch:+ ($arch)}"
   cmake "${args[@]}"
+
+  # TensorFlow 2.17 uses designated initializers, which MSVC takes only under
+  # C++20 where clang and gcc allow them as an extension — so it is the one
+  # toolchain that stops, on `operator.cc` and on the XNNPACK weight cache.
+  #
+  # The standard cannot be raised from out here: TFLite sets CMAKE_CXX_STANDARD
+  # to 17 in its own CMakeLists, which overrules the cache, and MSBuild puts
+  # the property that comes from it after the flags, so /std:c++20 in
+  # CMAKE_CXX_FLAGS loses too. What is left is the project files CMake just
+  # generated — which are this build's own output, not TensorFlow's source, and
+  # are rewritten from scratch by the next configure.
+  if [ "$TARGET" = windows_amd64 ]; then
+    echo "== raising the C++ standard in the generated projects"
+    find "$dir" -name '*.vcxproj' -exec \
+      sed -i 's|<LanguageStandard>stdcpp17</LanguageStandard>|<LanguageStandard>stdcpp20</LanguageStandard>|g' {} +
+  fi
   echo "== building tensorflowlite_c${arch:+ for $arch} (this takes a while)"
   cmake --build "$dir" -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
     --config Release --target tensorflowlite_c
