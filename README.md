@@ -74,7 +74,9 @@ Take the archive for your platform from a release, or build it yourself:
 ```
 
 The archive holds the library and a `.build` file naming the TensorFlow
-version, the commit and runner that produced it, and the checksum.
+version, the commit and runner that produced it, and the checksum. The
+Windows one also holds `tensorflowlite_c.lib`, the import library MSVC links
+against; the DLL alone is not something a link can use.
 `SHA256SUMS` on the release covers all four, which is what a lock file
 downstream wants.
 
@@ -93,7 +95,7 @@ revision = 3
 different flags are a different library, and a checksum in a lock file
 downstream would otherwise be the only thing that noticed.
 
-Together they name a release, `v2.17.1-b4`, and the tag has to match: the
+Together they name a release, `v2.17.1-b5`, and the tag has to match: the
 workflow reads `tflite.toml` and stops if the tag says something else. Changing
 that file is the whole of a version bump.
 

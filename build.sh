@@ -57,7 +57,7 @@ IOS_MIN=13.0
 case "$TARGET" in
   darwin_universal) LIB=libtensorflowlite_c.dylib ;;
   linux_amd64|linux_arm64) LIB=libtensorflowlite_c.so ;;
-  windows_amd64) LIB=tensorflowlite_c.dll ;;
+  windows_amd64) LIB=tensorflowlite_c.dll; IMPORT_LIB=tensorflowlite_c.lib ;;
   android_arm64) LIB=libtensorflowlite_c.so; ABI=arm64-v8a ;;
   android_arm) LIB=libtensorflowlite_c.so; ABI=armeabi-v7a ;;
   android_x64) LIB=libtensorflowlite_c.so; ABI=x86_64 ;;
@@ -281,6 +281,18 @@ else
   build_one ""
   [ -n "$BUILT" ] || { echo "built, but no $LIB was produced" >&2; exit 1; }
   cp "$BUILT" "$OUT/$LIB"
+
+  # MSVC does not link against a DLL; it links against the import library the
+  # DLL was built with, and without it the link stops at LNK1181 having never
+  # looked at the DLL at all. So the .lib travels in the archive too - it is
+  # 100 kB of stubs, and the alternative is every Windows caller generating
+  # one from the exports.
+  if [ "$TARGET" = windows_amd64 ]; then
+    IMPLIB=$(find "$WORK" -name "$IMPORT_LIB" -type f | head -1)
+    [ -n "$IMPLIB" ] || { echo "built, but no $IMPORT_LIB anywhere in $WORK" >&2; exit 1; }
+    cp "$IMPLIB" "$OUT/$IMPORT_LIB"
+    ls -l "$OUT/$IMPORT_LIB"
+  fi
 fi
 
 ls -l "$OUT/$LIB"

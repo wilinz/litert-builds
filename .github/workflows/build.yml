@@ -201,7 +201,8 @@ jobs:
         working-directory: out
         run: |
           $name = "tflite_c_${{ needs.settle.outputs.tag }}_${{ matrix.target }}"
-          Compress-Archive -Path '${{ matrix.lib }}', '${{ matrix.target }}.build' `
+          Compress-Archive -Path '${{ matrix.lib }}', 'tensorflowlite_c.lib', `
+                                 '${{ matrix.target }}.build' `
                            -DestinationPath "$name.zip"
           $sum = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$sum  $name.zip"

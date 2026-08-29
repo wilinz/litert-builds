@@ -10,7 +10,7 @@
 # bytes under the same TensorFlow version, and a checksum in a downstream lock
 # file would be the only thing that noticed.
 #
-# Together they name a release: v2.17.1-b4.
+# Together they name a release: v2.17.1-b5.
 [tensorflow]
 version = "v2.17.1"
-revision = 4
+revision = 5
