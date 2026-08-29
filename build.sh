@@ -288,13 +288,19 @@ build_one() {
     }
 
     # The C API's own entry points, from this target's objects. UNDEF lines are
-    # what an object calls rather than what it defines.
+    # what an object calls rather than what it defines, and the name is the
+    # last field of the line — as it is for /LINKERMEMBER below, and for the
+    # same reason: matching an anchored name keeps C++ mangled symbols that
+    # merely mention a TfLite type out of a list the linker will then insist
+    # on resolving. Matching `External | TfLite...` instead, which is what
+    # this did, quietly found nothing at all: v2.17.1-b6's 300 exports came
+    # from the static library alone, and this half contributed none of them.
     : > "$syms"
     while IFS= read -r obj; do
       "$DUMPBIN" /SYMBOLS "$obj" \
         | grep -v UNDEF \
-        | grep -oE 'External +\| +TfLite[A-Za-z0-9_]+' \
-        | awk '{ print $NF }' >> "$syms" || true
+        | awk '{ print $NF }' \
+        | grep -E '^TfLite[A-Za-z0-9_]+$' >> "$syms" || true
     done < "$objs"
     echo "   from the objects: $(sort -u "$syms" | wc -l | tr -d ' ')"
 
