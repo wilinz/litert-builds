@@ -165,6 +165,15 @@ build_one() {
         # target, and an application would otherwise be handed a library
         # missing every kernel it needs.
         -DTFLITE_C_BUILD_SHARED_LIBS=OFF
+        # flatbuffers builds flatc and installs it, and for iOS CMake makes
+        # every executable an app bundle, which install() then refuses without
+        # a bundle destination. TFLite builds the flatc it actually uses as a
+        # host tool through ExternalProject, so the one in the tree is dead
+        # weight anywhere and a configure error here. MACOSX_BUNDLE off is the
+        # same argument for whatever else declares an executable.
+        -DFLATBUFFERS_BUILD_FLATC=OFF
+        -DFLATBUFFERS_INSTALL=OFF
+        -DCMAKE_MACOSX_BUNDLE=OFF
       )
       ;;
     *)
