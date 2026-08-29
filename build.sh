@@ -83,7 +83,7 @@ case "$TARGET" in
     }
     # llvm-strip is a symlink to llvm-strip.real in the NDK, so -type f would
     # walk straight past it.
-    STRIP=$(find "$NDK/toolchains/llvm/prebuilt" -name 'llvm-strip' \( -type f -o -type l \) | head -1)
+    STRIP=$(find "$NDK/toolchains/llvm/prebuilt" -name 'llvm-strip' \( -type f -o -type l \) -print -quit)
     [ -n "$STRIP" ] || { echo "no llvm-strip in $NDK" >&2; exit 1; }
     ;;
 esac
@@ -129,6 +129,44 @@ PREFIX_MAP="-ffile-prefix-map=$WORK=/tflite -ffile-prefix-map=$HERE=/tflite"
 # cmake would be swallowed and the caller would report the library missing
 # instead of the compiler error that explains why. Which is exactly what a
 # Windows build did, for one whole run.
+# TensorFlow 2.17 uses designated initializers, which MSVC takes only under
+# C++20 where clang and gcc allow them as an extension — so it is the one
+# toolchain that stops, on `operator.cc` and on the XNNPACK weight cache.
+#
+# The standard cannot be raised from outside: TFLite sets CMAKE_CXX_STANDARD to
+# 17 in its own CMakeLists, which overrules the cache, and MSBuild puts the
+# property that comes from it after the flags, so /std:c++20 in CMAKE_CXX_FLAGS
+# loses too. What is left is the project files CMake just generated — this
+# build's own output, not TensorFlow's source. Every configure writes them
+# again, so every configure is followed by this.
+raise_cxx_standard() {
+  echo "== raising the C++ standard in the generated projects"
+  find "$1" -name '*.vcxproj' -exec \
+    sed -i 's|<LanguageStandard>stdcpp17</LanguageStandard>|<LanguageStandard>stdcpp20</LanguageStandard>|g' {} +
+}
+
+# dumpbin reads what the compiler produced, and ships beside it rather than on
+# PATH. Not `vswhere -find cl.exe`, which is how the workflow finds the
+# compiler: it answered with a side-by-side 14.29 toolset that carries a cl.exe
+# and no dumpbin.exe, while the build itself used 14.51. So every toolset in
+# every installation is searched and the newest wins — any recent dumpbin reads
+# these objects the same way.
+find_dumpbin() {
+  echo "== looking for dumpbin"
+  DUMPBIN=$(find "/c/Program Files/Microsoft Visual Studio" \
+                 "/c/Program Files (x86)/Microsoft Visual Studio" \
+                 -name dumpbin.exe -path '*Hostx64/x64*' 2>/dev/null | sort -V | tail -1)
+  echo "   dumpbin: ${DUMPBIN:-<nothing found>}"
+  [ -n "$DUMPBIN" ] || { echo "no dumpbin.exe in any Visual Studio installation"; return 1; }
+}
+
+# `find ... -print -quit` and never `find ... | head -1`, throughout: this
+# script runs under `set -o pipefail`, head closes the pipe after the first
+# line, and a find still walking a large tree is then killed by SIGPIPE — so
+# the pipeline reports 141, `set -e` stops the script, and nothing is printed
+# to say why. That is what two Windows runs looked like: an echo, then exit 1.
+# It depends on how much of the tree is left to walk, which is why the same
+# line worked for years elsewhere.
 BUILT=
 build_one() {
   local arch="$1"
@@ -201,27 +239,94 @@ build_one() {
   echo "== configuring $TARGET${arch:+ ($arch)}"
   cmake "${args[@]}"
 
-  # TensorFlow 2.17 uses designated initializers, which MSVC takes only under
-  # C++20 where clang and gcc allow them as an extension — so it is the one
-  # toolchain that stops, on `operator.cc` and on the XNNPACK weight cache.
-  #
-  # The standard cannot be raised from out here: TFLite sets CMAKE_CXX_STANDARD
-  # to 17 in its own CMakeLists, which overrules the cache, and MSBuild puts
-  # the property that comes from it after the flags, so /std:c++20 in
-  # CMAKE_CXX_FLAGS loses too. What is left is the project files CMake just
-  # generated — which are this build's own output, not TensorFlow's source, and
-  # are rewritten from scratch by the next configure.
   if [ "$TARGET" = windows_amd64 ]; then
-    echo "== raising the C++ standard in the generated projects"
-    find "$dir" -name '*.vcxproj' -exec \
-      sed -i 's|<LanguageStandard>stdcpp17</LanguageStandard>|<LanguageStandard>stdcpp20</LanguageStandard>|g' {} +
+    raise_cxx_standard "$dir"
   fi
   echo "== building tensorflowlite_c${arch:+ for $arch} (this takes a while)"
   cmake --build "$dir" -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)" \
     --config Release --target tensorflowlite_c
+
+  # Windows links again, against a list of what to export.
+  #
+  # Nothing about the first link says anything is wrong: MSVC exports only
+  # what a symbol asks to export, TFLite's C API asks through TFL_CAPI_EXPORT,
+  # and that macro is empty whenever TFL_STATIC_LIBRARY_BUILD is defined —
+  # which tensorflow-lite, built static, adds PUBLIC to everything linking it,
+  # the C API's own shared library included. So the DLL came out with an empty
+  # export table, and a DLL that exports nothing gets no import library
+  # either. It linked, it was the right size, and nothing could call into it.
+  # Every release up to v2.17.1-b5 shipped that DLL.
+  #
+  # The other two platforms are unaffected: their scripts (exported_symbols.lds
+  # on Apple, version_script.lds elsewhere) name `TfLite*` and decide exports
+  # on their own. This is the same list, in the form MSVC takes, gathered from
+  # the objects rather than written down — the XNNPACK delegate's entry points
+  # are in the static library rather than in this target's own objects, and
+  # the Linux .so exports them too.
+  if [ "$TARGET" = windows_amd64 ]; then
+    def="$dir/tensorflowlite_c.def"
+    echo "== collecting the exports for $LIB"
+    find_dumpbin
+    static_lib=$(find "$dir" -name tensorflow-lite.lib -type f -print -quit)
+    [ -n "$static_lib" ] || { echo "no tensorflow-lite.lib under $dir" >&2; exit 1; }
+    echo "   static library: $static_lib"
+
+    # Every step writes a file and says how big it is. Under `set -o pipefail`
+    # a grep that matches nothing, or a dumpbin handed no arguments, ends the
+    # script with no output at all, and this ran three times before it said
+    # anything about where it stopped.
+    objs="$dir/exports-objects.txt"
+    syms="$dir/exports-symbols.txt"
+    names="$dir/exports.txt"
+
+    find "$dir" -name '*.obj' -path '*tensorflowlite_c*' > "$objs" || true
+    echo "   objects: $(wc -l < "$objs" | tr -d ' ')"
+    [ -s "$objs" ] || {
+      echo "no objects for tensorflowlite_c under $dir; what is there:"
+      find "$dir" -maxdepth 2 -type d | head -40
+      exit 1
+    }
+
+    # The C API's own entry points, from this target's objects. UNDEF lines are
+    # what an object calls rather than what it defines.
+    : > "$syms"
+    while IFS= read -r obj; do
+      "$DUMPBIN" /SYMBOLS "$obj" \
+        | grep -v UNDEF \
+        | grep -oE 'External +\| +TfLite[A-Za-z0-9_]+' \
+        | awk '{ print $NF }' >> "$syms" || true
+    done < "$objs"
+    echo "   from the objects: $(sort -u "$syms" | wc -l | tr -d ' ')"
+
+    # The XNNPACK delegate's, from the static library: they are not in this
+    # target's objects, and the Linux .so exports them. /LINKERMEMBER lists the
+    # public symbols an archive defines, which /SYMBOLS on a library this size
+    # would take minutes to say. The name is the last field; anchoring the
+    # match keeps C++ mangled names that merely mention a TfLite type out of a
+    # list the linker will then insist on resolving.
+    "$DUMPBIN" /LINKERMEMBER:1 "$static_lib" \
+      | awk '{ print $NF }' \
+      | grep -E '^TfLite[A-Za-z0-9_]+$' >> "$syms" || true
+
+    sort -u "$syms" -o "$names"
+    count=$(wc -l < "$names" | tr -d ' ')
+    # The C API is a couple of hundred entry points; a handful means they were
+    # looked for in the wrong place, and shipping that would be the same silent
+    # failure in a new shape.
+    [ "$count" -ge 100 ] || {
+      echo "only $count exports found, which cannot be the whole C API" >&2
+      exit 1
+    }
+    echo "   first few: $(head -5 "$names" | tr '\n' ' ')"
+    { echo EXPORTS; cat "$names"; } > "$def"
+    echo "== relinking with $count exports"
+    cmake "${args[@]}" -DCMAKE_SHARED_LINKER_FLAGS="/DEF:$(cygpath -w "$def")"
+    raise_cxx_standard "$dir"
+    cmake --build "$dir" --config Release --target tensorflowlite_c
+  fi
   case "$TARGET" in
     ios_*) join_archives "$dir" "$WORK/$TARGET${arch:+-$arch}.a" ;;
-    *) BUILT=$(find "$dir" -name "$LIB" -type f | head -1) ;;
+    *) BUILT=$(find "$dir" -name "$LIB" -type f -print -quit) ;;
   esac
 
   # The NDK's toolchain file compiles with -g even in a release build, on the
@@ -288,7 +393,7 @@ else
   # 100 kB of stubs, and the alternative is every Windows caller generating
   # one from the exports.
   if [ "$TARGET" = windows_amd64 ]; then
-    IMPLIB=$(find "$WORK" -name "$IMPORT_LIB" -type f | head -1)
+    IMPLIB=$(find "$WORK" -name "$IMPORT_LIB" -type f -print -quit)
     [ -n "$IMPLIB" ] || { echo "built, but no $IMPORT_LIB anywhere in $WORK" >&2; exit 1; }
     cp "$IMPLIB" "$OUT/$IMPORT_LIB"
     ls -l "$OUT/$IMPORT_LIB"

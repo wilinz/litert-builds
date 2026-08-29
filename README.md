@@ -95,7 +95,7 @@ revision = 3
 different flags are a different library, and a checksum in a lock file
 downstream would otherwise be the only thing that noticed.
 
-Together they name a release, `v2.17.1-b5`, and the tag has to match: the
+Together they name a release, `v2.17.1-b6`, and the tag has to match: the
 workflow reads `tflite.toml` and stops if the tag says something else. Changing
 that file is the whole of a version bump.
 
