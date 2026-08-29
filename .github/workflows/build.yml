@@ -16,9 +16,14 @@
 # different flags are a different library, and a checksum in a lock file
 # downstream would be the only thing that noticed.
 #
-# There is no build cache. It would be keyed on exactly what the tag names, a
-# near-miss would restore a tree the script then declines to re-clone, and this
-# runs a few times a year.
+# Only the Windows job carries a cache. Its MSVC build is the longest by far,
+# its incremental build is sound — up-to-dateness is decided from content
+# hashes, not restored timestamps — and a re-tag after a script change would
+# otherwise rebuild it for nothing. The keys name exactly the inputs that
+# decided the bytes (version, script, compiler), and there are no fallback
+# keys: a near-miss must miss, not restore a tree built from other inputs.
+# The rest build fast enough that a cache is not worth its failure modes, and
+# this runs a few times a year.
 name: build
 
 on:
@@ -60,9 +65,11 @@ jobs:
             exit 1
           fi
 
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "revision=$revision"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
           echo "building TensorFlow $version at build revision $revision, publishing as $tag"
 
   build:
@@ -118,6 +125,34 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4
+
+      # The compiler is part of the cache key, or a runner image update would
+      # silently reuse objects an older MSVC compiled. The key is the
+      # compiler's own version, not the toolset's.
+      - name: Stamp the compiler (for the cache key)
+        if: matrix.target == 'windows_amd64'
+        shell: bash
+        id: clver
+        run: |
+          VSWHERE="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          CL=$(cygpath -u "$("$VSWHERE" -latest -find '**/Hostx64/x64/cl.exe' | head -1 | tr -d '\r')")
+          version=$("$CL" 2>&1 | sed -n 's/.*Version \([0-9][0-9.]*\).*/\1/p' | head -1)
+          [ -n "$version" ] || { echo "no MSVC version out of $CL" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the sources
+        if: matrix.target == 'windows_amd64'
+        uses: actions/cache@v4
+        with:
+          path: .work/tensorflow
+          key: tflite-src-${{ needs.settle.outputs.version }}
+
+      - name: Cache the build
+        if: matrix.target == 'windows_amd64'
+        uses: actions/cache@v4
+        with:
+          path: .work/build-windows_amd64
+          key: tflite-build-windows-${{ needs.settle.outputs.version }}-${{ hashFiles('build.sh') }}-cl${{ steps.clver.outputs.version }}
 
       - name: Build
         shell: bash
