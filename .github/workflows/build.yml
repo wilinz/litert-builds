@@ -188,22 +188,34 @@ jobs:
           } > ${{ matrix.target }}.build
           cat ${{ matrix.target }}.build
 
-      - name: Archive
+      # PowerShell, because it is the one tool on this runner that makes a
+      # zip. This used to be `tar -a -c -f $NAME.zip`, counting on the bsdtar
+      # Windows ships as tar.exe — but `shell: bash` is msys bash, whose tar
+      # is GNU tar, whose -a picks a *compressor* from the extension and knows
+      # no zip format at all. It wrote a plain tar and named it .zip, and
+      # nothing here failed: v2.17.1-b3's Windows archive is that tar, and it
+      # was the downstream unpacker that found out.
+      - name: Archive (zip)
+        if: matrix.ext == 'zip'
+        shell: pwsh
+        working-directory: out
+        run: |
+          $name = "tflite_c_${{ needs.settle.outputs.tag }}_${{ matrix.target }}"
+          Compress-Archive -Path '${{ matrix.lib }}', '${{ matrix.target }}.build' `
+                           -DestinationPath "$name.zip"
+          $sum = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$sum  $name.zip"
+
+      - name: Archive (tar.gz)
+        if: matrix.ext != 'zip'
         shell: bash
         working-directory: out
         env:
           NAME: tflite_c_${{ needs.settle.outputs.tag }}_${{ matrix.target }}
         run: |
-          if [ "${{ matrix.ext }}" = zip ]; then
-            # bsdtar, which Windows carries as tar.exe, and -a picks the format
-            # from the extension. Not 7z: the runner image stopped shipping it,
-            # and this needs nothing installed.
-            tar -a -c -f "$NAME.zip" "${{ matrix.lib }}" "${{ matrix.target }}.build"
-          else
-            tar czf "$NAME.tar.gz" "${{ matrix.lib }}" "${{ matrix.target }}.build"
-          fi
-          if command -v sha256sum >/dev/null 2>&1; then sha256sum "$NAME.${{ matrix.ext }}"
-          else shasum -a 256 "$NAME.${{ matrix.ext }}"
+          tar czf "$NAME.tar.gz" "${{ matrix.lib }}" "${{ matrix.target }}.build"
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum "$NAME.tar.gz"
+          else shasum -a 256 "$NAME.tar.gz"
           fi
 
       - uses: actions/upload-artifact@v4
