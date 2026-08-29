@@ -19,11 +19,15 @@
 # Only the Windows job carries a cache. Its MSVC build is the longest by far,
 # its incremental build is sound — up-to-dateness is decided from content
 # hashes, not restored timestamps — and a re-tag after a script change would
-# otherwise rebuild it for nothing. The keys name exactly the inputs that
-# decided the bytes (version, script, compiler), and there are no fallback
-# keys: a near-miss must miss, not restore a tree built from other inputs.
-# The rest build fast enough that a cache is not worth its failure modes, and
-# this runs a few times a year.
+# otherwise rebuild it for nothing. The rest build fast enough that a cache is
+# not worth its failure modes, and this runs a few times a year.
+#
+# The keys name what decides the bytes: version, script, compiler. A near-miss
+# falls back to an older tree for the same TensorFlow version rather than to
+# nothing, which is safe for the same reason the cache is: MSBuild rebuilds
+# what it finds stale instead of trusting what it was handed. And the saves
+# run on failure too, because a cache that is only written when the job
+# succeeds keeps nothing from the runs that needed it.
 name: build
 
 on:
@@ -140,23 +144,56 @@ jobs:
           [ -n "$version" ] || { echo "no MSVC version out of $CL" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Cache the sources
+      # Restore and save are separate steps, and the saves run whatever
+      # happened, because actions/cache does not write a cache when the job
+      # fails — which is precisely the run whose hours were worth keeping. Four
+      # attempts at the Windows export list each rebuilt TensorFlow from
+      # nothing, having cached none of the twenty minutes before them.
+      - name: Restore the sources
         if: matrix.target == 'windows_amd64'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .work/tensorflow
           key: tflite-src-${{ needs.settle.outputs.version }}
 
-      - name: Cache the build
+      # The key still names everything that decides the objects, so a changed
+      # script or compiler is a miss. What is new is the fallback: an older
+      # tree for the same TensorFlow version is restored and then brought up to
+      # date rather than thrown away. That is only safe because MSBuild decides
+      # what is stale from content hashes rather than timestamps, which is the
+      # same reason this cache was worth having at all — a restored tree it
+      # disagrees with is rebuilt, not reused.
+      - name: Restore the build
         if: matrix.target == 'windows_amd64'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .work/build-windows_amd64
           key: tflite-build-windows-${{ needs.settle.outputs.version }}-${{ hashFiles('build.sh') }}-cl${{ steps.clver.outputs.version }}
+          restore-keys: |
+            tflite-build-windows-${{ needs.settle.outputs.version }}-
 
       - name: Build
         shell: bash
         run: ./build.sh ${{ matrix.target }} "$GITHUB_WORKSPACE/out"
+
+      # `always()`, for the reason above. A save whose key is already there is
+      # a warning rather than a failure, and neither is worth a red run.
+      - name: Save the sources
+        if: always() && matrix.target == 'windows_amd64'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .work/tensorflow
+          key: tflite-src-${{ needs.settle.outputs.version }}
+
+      - name: Save the build
+        if: always() && matrix.target == 'windows_amd64'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .work/build-windows_amd64
+          # The same key as the restore above; workflows have no YAML anchors.
+          key: tflite-build-windows-${{ needs.settle.outputs.version }}-${{ hashFiles('build.sh') }}-cl${{ steps.clver.outputs.version }}
 
       # What was built, by what, from what. A downstream lock file records the
       # checksum; this records everything that decided it.
