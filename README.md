@@ -43,6 +43,10 @@ So this builds them: nine targets, one script, in CI, from a pinned version.
 
 Android is built against API 24 and iOS against 13.0, which are floors rather
 than choices: a library built for a newer one will not load on an older phone.
+Its libraries are stripped afterwards, which nothing else here needs: the NDK's
+toolchain compiles with `-g` even in a release build, on the assumption that
+the Android Gradle plugin will strip whatever it packages, and a library
+published on its own has nobody to do that for it — 73 MB against 5.
 
 The iOS libraries are static — an application has no rpath to load a `.dylib`
 from — and each is every archive the build produced joined into one, because
@@ -81,7 +85,7 @@ downstream wants.
 ```toml
 [tensorflow]
 version = "v2.17.1"
-revision = 1
+revision = 2
 ```
 
 `version` is TensorFlow's. `revision` is this repository's, and it moves when
@@ -89,7 +93,7 @@ revision = 1
 different flags are a different library, and a checksum in a lock file
 downstream would otherwise be the only thing that noticed.
 
-Together they name a release, `v2.17.1-b1`, and the tag has to match: the
+Together they name a release, `v2.17.1-b2`, and the tag has to match: the
 workflow reads `tflite.toml` and stops if the tag says something else. Changing
 that file is the whole of a version bump.
 

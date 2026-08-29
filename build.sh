@@ -81,6 +81,8 @@ case "$TARGET" in
       echo "no NDK: set ANDROID_NDK_HOME to one" >&2
       exit 1
     }
+    STRIP=$(find "$NDK/toolchains/llvm/prebuilt" -name 'llvm-strip' -type f | head -1)
+    [ -n "$STRIP" ] || { echo "no llvm-strip in $NDK" >&2; exit 1; }
     ;;
 esac
 
@@ -219,6 +221,18 @@ build_one() {
     ios_*) join_archives "$dir" "$WORK/$TARGET${arch:+-$arch}.a" ;;
     *) BUILT=$(find "$dir" -name "$LIB" -type f | head -1) ;;
   esac
+
+  # The NDK's toolchain file compiles with -g even in a release build, on the
+  # assumption that the Android Gradle plugin will strip what it packages. A
+  # library published on its own has nobody to do that for it, and the
+  # difference is not small: 73 MB against 5.
+  #
+  # --strip-unneeded and not --strip-all: the dynamic symbols are the library's
+  # entire interface.
+  if [ -n "${STRIP:-}" ] && [ -n "$BUILT" ]; then
+    echo "== stripping $(basename "$BUILT")"
+    "$STRIP" --strip-unneeded "$BUILT"
+  fi
 }
 
 # Puts every archive a build produced into one, which is what an application
