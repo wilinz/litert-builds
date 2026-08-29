@@ -81,7 +81,9 @@ case "$TARGET" in
       echo "no NDK: set ANDROID_NDK_HOME to one" >&2
       exit 1
     }
-    STRIP=$(find "$NDK/toolchains/llvm/prebuilt" -name 'llvm-strip' -type f | head -1)
+    # llvm-strip is a symlink to llvm-strip.real in the NDK, so -type f would
+    # walk straight past it.
+    STRIP=$(find "$NDK/toolchains/llvm/prebuilt" -name 'llvm-strip' \( -type f -o -type l \) | head -1)
     [ -n "$STRIP" ] || { echo "no llvm-strip in $NDK" >&2; exit 1; }
     ;;
 esac
